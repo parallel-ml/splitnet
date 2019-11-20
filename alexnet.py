@@ -1,8 +1,6 @@
 import torch
 import torch.nn as nn
 
-from util import param_size
-
 
 class AlexNet(nn.Module):
 
@@ -44,14 +42,13 @@ class AlexNet(nn.Module):
 
 class SplitAlexNet(nn.Module):
 
-    def __init__(self, num_classes=1000, split=(2, 4, 8)):
+    def __init__(self, num_classes=1000, splits=(2, 4, 8)):
         super(SplitAlexNet, self).__init__()
 
-        assert len(split) == 3, 'Split must be length of 3.'
-
-        self.scale0 = split[0]
-        self.scale1 = split[1] // split[0]
-        self.scale2 = split[2] // split[1]
+        if len(splits) == 3:
+            self.splits = [1, 1] + list(splits)
+        else:
+            self.splits = splits
 
         self.features = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=11, stride=4, padding=2),
@@ -62,51 +59,61 @@ class SplitAlexNet(nn.Module):
             nn.MaxPool2d(kernel_size=3, stride=2),
             nn.Conv2d(192, 384, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(384, 256, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=3, stride=2),
         )
+
+        self.conv1 = nn.ModuleList(
+            [nn.Conv2d(384 // self.splits[0], 256 // self.splits[0], kernel_size=3, padding=1) for _ in
+             range(self.splits[0])])
+        self.conv2 = nn.ModuleList(
+            [nn.Conv2d(256 // self.splits[1], 256 // self.splits[1], kernel_size=3, padding=1) for _ in
+             range(self.splits[1])])
+        self.pool = nn.MaxPool2d(kernel_size=3, stride=2)
+
         self.avgpool = nn.AdaptiveAvgPool2d((6, 6))
 
-        self.fc1 = nn.ModuleList([nn.Linear(256 * 6 * 6 // split[0], 4096 // split[0]) for _ in range(split[0])])
-        self.fc2 = nn.ModuleList([nn.Linear(4096 // split[1], 4096 // split[1]) for _ in range(split[1])])
-        self.fc3 = nn.ModuleList([nn.Linear(4096 // split[2], num_classes // split[2]) for _ in range(split[2])])
+        self.fc1 = nn.ModuleList(
+            [nn.Linear(256 * 6 * 6 // self.splits[2], 4096 // self.splits[2]) for _ in range(self.splits[2])])
+        self.fc2 = nn.ModuleList(
+            [nn.Linear(4096 // self.splits[3], 4096 // self.splits[3]) for _ in range(self.splits[3])])
+        self.fc3 = nn.ModuleList(
+            [nn.Linear(4096 // self.splits[4], num_classes // self.splits[4]) for _ in range(self.splits[4])])
 
     def forward(self, x):
         x = self.features(x)
+        x = [x]
+
+        x = self._scale(x, 0)
+        x = [mod(x[i]) for i, mod in enumerate(self.conv1)]
+
+        x = self._scale(x, 1)
+        x = [mod(x[i]) for i, mod in enumerate(self.conv2)]
+
+        x = torch.cat(x, dim=1)
+        x = self.pool(x)
+
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
         x = [x]
 
-        x = self._scale(x, self.scale0)
+        x = self._scale(x, 2)
         x = [mod(x[i]) for i, mod in enumerate(self.fc1)]
 
-        x = self._scale(x, self.scale1)
+        x = self._scale(x, 3)
         x = [mod(x[i]) for i, mod in enumerate(self.fc2)]
 
-        x = self._scale(x, self.scale2)
+        x = self._scale(x, 4)
         x = [mod(x[i]) for i, mod in enumerate(self.fc3)]
         return x
 
     def _scale(self, x, scale):
-        chunk_size = x[0].size(-1) // scale
-
-        scale_size = []
-        for i in range(scale):
-            scale_size.append(i * chunk_size)
-        scale_size.append(-1)
-
-        x_scale = []
-        for x_unit in x:
-            x_unit = torch.split(x_unit, chunk_size, dim=-1)
-            x_scale += list(x_unit)
-        return x_scale
+        split = self.splits[scale]
+        tensor = torch.cat(x, dim=1)
+        chunk_size = tensor.size(1) // split
+        return list(torch.split(tensor, chunk_size, 1))
 
 
 if __name__ == '__main__':
     from torchsummary import summary
 
-    net = SplitAlexNet(1000, (1, 1, 3))
+    net = SplitAlexNet(1000, (2, 2, 2, 2, 2))
     summary(net, (3, 224, 224))
